@@ -22,6 +22,8 @@ logs/
 *.fdb_latexmk
 *.synctex.gz
 *.xdv
+*.bbl
+*.blg
 
 # Editor / OS
 .DS_Store
@@ -44,3 +46,13 @@ NLP_ADV/
 steps/12_joint_pipeline/outputs/canon_input.json
 steps/12_joint_pipeline/outputs/segments_*.json
 steps/12_joint_pipeline/outputs/canonical_gold.json
+
+# Canonicalization batch: the *inputs* are 5 MB of raw segment text, regenerable by
+# split_batch.py from canon_input.json. The *outputs* (canonical_part_*.json) are the
+# actual LLM work product and ARE committed.
+handoff_canon_batch/segments_to_canonicalize.json
+handoff_canon_batch/part_A.json
+handoff_canon_batch/part_B.json
+
+# Redundant with the extracted template/ directory
+template.zip

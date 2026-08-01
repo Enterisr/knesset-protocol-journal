@@ -32,6 +32,7 @@ Usage (CPU):
 
 import json
 import logging
+import math
 from itertools import product
 from pathlib import Path
 
@@ -230,6 +231,174 @@ def sweep_margin(records):
                 fn += r["gold_is_repeat"]; tn += (not r["gold_is_repeat"])
         rows.append({"theta_margin": round(float(theta), 4), **confusion(tp, fp, fn, tn)})
     return rows
+
+
+def _zstat(c, m=None):
+    """Standardize the top score against the arrival's OWN candidate distribution.
+
+    `m` sets how LOCAL the null is: the null is the m next-best candidates after
+    the top one (m=None -> all of them). m=2 is the neighbourhood the margin rule
+    looks at; m=None is the whole journal. Sweeping m tests whether the confound
+    this corpus suffers from is local (a small family of near-identical
+    bureaucratic templates) or global (journal growth inflating the max).
+
+    Each arrival takes a max over n journal entries, and n grows from 1 to ~500
+    across the stream. Under the null (no true match) E[max] rises with n, so a
+    flat theta is strict early and permissive late -- exactly backwards. The
+    margin rule (top1 - top2) is a rank-2 proxy for the same idea; this uses the
+    whole rest-of-distribution as the null instead of just the runner-up.
+
+    The null EXCLUDES the top candidate (leave-top-out), so a true match does not
+    inflate the null it is being tested against.
+
+    Returns (k, z, n), or None when n < 3 -- with fewer than two non-top scores
+    there is no null to estimate and the arrival is scored NEW (see
+    coldstart_stats: this never discards a true repeat on our data).
+    """
+    n = len(c)
+    if n < 3:
+        return None
+    k = int(np.argmax(c))
+    rest = np.delete(c, k)
+    if m is not None and m < len(rest):
+        rest = np.partition(rest, -m)[-m:]      # the m next-best candidates
+    sd = rest.std(ddof=1)
+    if sd < 1e-12:
+        return None
+    return k, float((c[k] - rest.mean()) / sd), n
+
+
+def coldstart_stats(records):
+    """How many decisions the z-rules abstain on, and how many were true repeats."""
+    skipped = [r for r in records if _zstat(r["cos"]) is None]
+    return {"n_records": len(records), "n_coldstart_skipped": len(skipped),
+            "n_coldstart_skipped_positive": int(sum(r["gold_is_repeat"] for r in skipped))}
+
+
+def _tally(decisions):
+    """decisions: iterable of (link: bool, k: int|None, record) -> confusion dict."""
+    tp = fp = fn = tn = 0
+    for link, k, r in decisions:
+        if link:
+            if r["gold_is_repeat"] and k == r["gold_entry"]:
+                tp += 1
+            else:
+                fp += 1
+        else:
+            fn += r["gold_is_repeat"]; tn += (not r["gold_is_repeat"])
+    return confusion(tp, fp, fn, tn)
+
+
+def sweep_zscore(records, m=None):
+    """LINK if the top candidate is z sigmas above the arrival's own null.
+
+    Thetas are the empirical quantiles of the observed z values rather than a
+    fixed grid, so the sweep covers the whole operating frontier regardless of
+    how the transform scales the similarities.
+    """
+    zs = [s[1] for s in (_zstat(r["cos"], m) for r in records) if s is not None]
+    if not zs:
+        return []
+    grid = np.unique(np.quantile(zs, np.linspace(0.0, 1.0, THETA_STEPS)))
+    grid = np.append(grid, grid[-1] + 1.0)          # "never link" endpoint
+    rows = []
+    for theta in grid:
+        def decisions():
+            for r in records:
+                s = _zstat(r["cos"], m)
+                if s is None:
+                    yield False, None, r
+                else:
+                    k, z, _ = s
+                    yield z >= theta, k, r
+        rows.append({"theta_z": round(float(theta), 4), **_tally(decisions())})
+    return rows
+
+
+def sweep_zscore_sidak(records, m=None):
+    """Multiple-comparisons correction: link if the top candidate survives a
+    Sidak-corrected tail test against the arrival's own null.
+
+        p       = P(Z >= z)  under a Gaussian null
+        p_corr  = 1 - (1 - p)^n     <- n candidates were searched for this max
+
+    LINK iff p_corr <= alpha. Unlike a flat theta this tightens automatically as
+    the journal grows, which is the failure mode the base-rate analysis predicts.
+    """
+    rows = []
+    for alpha in np.logspace(-12, 0, THETA_STEPS):
+        def decisions():
+            for r in records:
+                s = _zstat(r["cos"], m)
+                if s is None:
+                    yield False, None, r
+                    continue
+                k, z, n = s
+                p = 0.5 * math.erfc(z / math.sqrt(2.0))
+                p = min(max(p, 1e-300), 1.0 - 1e-16)
+                p_corr = -math.expm1(n * math.log1p(-p))
+                yield p_corr <= alpha, k, r
+        rows.append({"alpha": float(f"{alpha:.4g}"), **_tally(decisions())})
+    return rows
+
+
+def sweep_margin_recency(records, window=None):
+    """Margin rule restricted to entries last updated within `window` days.
+
+    Every other lever in this step tries to score better. This one shrinks the
+    candidate set, i.e. the false-positive OPPORTUNITY, which scoring cannot do:
+    the mean journal holds 231 entries at decision time, but true repeats in this
+    corpus recur in bursts (median gap 7d, IQR 1-14d, largest observed 34d over a
+    338-day span), so a long-dormant entry is not a plausible continuation.
+
+    Requires records carrying "age" (days since each entry's last update, computed
+    BEFORE the arrival is filed) -- i.e. honest_centroid_records, not stream_records.
+    `window=None` disables the gate and reproduces sweep_margin exactly.
+    """
+    rows = []
+    for theta in np.linspace(0.0, 0.6, THETA_STEPS):
+        tp = fp = fn = tn = 0
+        for r in records:
+            c = r["cos"]
+            alive = (np.arange(len(c)) if window is None
+                     else np.flatnonzero(r["age"] <= window))
+            if len(alive) == 0:                       # nothing recent -> must be NEW
+                fn += r["gold_is_repeat"]; tn += (not r["gold_is_repeat"])
+                continue
+            ca = c[alive]
+            k = int(alive[int(np.argmax(ca))])        # index back into the FULL journal
+            if len(ca) >= 2:
+                srt = np.partition(ca, -2)
+                margin = srt[-1] - srt[-2]
+            else:
+                margin = ca[0]                        # one candidate: use magnitude
+            if margin >= theta:
+                if r["gold_is_repeat"] and k == r["gold_entry"]:
+                    tp += 1
+                else:
+                    fp += 1
+            else:
+                fn += r["gold_is_repeat"]; tn += (not r["gold_is_repeat"])
+        rows.append({"theta_margin": round(float(theta), 4), "window_days": window,
+                     **confusion(tp, fp, fn, tn)})
+    return rows
+
+
+def recency_stats(records, window):
+    """What the gate costs before any scoring: candidates removed, repeats lost."""
+    alive_n, excluded_repeats, no_candidate = [], 0, 0
+    for r in records:
+        alive = np.flatnonzero(r["age"] <= window)
+        alive_n.append(len(alive))
+        if len(alive) == 0:
+            no_candidate += 1
+        if r["gold_is_repeat"] and r["gold_entry"] not in alive:
+            excluded_repeats += 1
+    return {"window_days": window,
+            "mean_candidates": round(float(np.mean(alive_n)), 1),
+            "mean_journal_size": round(float(np.mean([len(r["cos"]) for r in records])), 1),
+            "decisions_with_no_candidate": no_candidate,
+            "true_repeats_excluded": excluded_repeats}
 
 
 def sweep_dp(records, sigma2, sigma0_2):

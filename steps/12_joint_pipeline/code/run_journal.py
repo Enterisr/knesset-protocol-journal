@@ -12,6 +12,9 @@ Stages (all in one job):
   2. LINK online with the Step-10 method (ABTT-k1 + accumulated centroid + margin
      gate at a fixed operating point): each segment joins the best existing journal
      entry if its distinctiveness margin clears theta, else opens a new entry.
+     The ABTT transform is refit at every step on the prefix seen so far, so the
+     linking is streaming-honest (no look-ahead). --batch_transform reverts to the
+     leaky whole-corpus fit for comparison.
   3. LOG-WRITE per entry with the Step-9 method (dictalm2): an opening summary for
      the entry's first segment, then an incremental update per later segment,
      conditioned on the running journal (GPU).
@@ -22,8 +25,10 @@ build_raw_segments.py). Output: outputs/journal_<tag>.json.
 
 Usage (GPU, one job):
     python steps/12_joint_pipeline/code/run_journal.py \
-        --segments outputs/segments_raw.json --tag raw \
-        --theta 0.34 --logwrite_model dicta-il/dictalm2.0-instruct
+        --segments outputs/segments_raw.json --tag raw_fmr5 \
+        --theta 0.342 --logwrite_model dicta-il/dictalm2.0-instruct
+    python steps/12_joint_pipeline/code/run_journal.py \
+        --segments outputs/segments_raw.json --tag raw_f1 --theta 0.156
 """
 import argparse
 import json
@@ -82,30 +87,77 @@ def snippet(t, n=SNIPPET_WORDS):
     return " ".join(t.split()[:n])
 
 
-def link(Xt, rows, theta):
-    """Step-10 online linking: centroid + margin gate. Returns list of entries
-    (each a list of row indices in chronological order)."""
+def link(emb, rows, theta, k=1, honest=True):
+    """Step-10 online linking: ABTT-k + accumulated centroid + margin gate.
+
+    honest=True refits the ABTT transform at every step on ONLY the segments seen
+    so far, which is what the streaming setting actually permits. Fitting it once
+    over the whole corpus (honest=False) leaks future segments into the transform
+    -- Step 10 measured that leak directly (batch 0.250 -> honest 0.094 for
+    whitening) and its reported operating points are the honest ones, so the
+    thetas below are only valid under honest=True.
+
+    Returns a list of entries, each a list of row indices in chronological order.
+    """
     order = sorted(range(len(rows)), key=lambda i: (rows[i]["date"], rows[i]["seg_key"]))
-    entries = []          # list of member-index lists
-    assign = {}
-    for i in order:
-        x = Xt[i]
+    entries = []          # entry idx -> list of positions p (into `order`)
+    Xt_full = None if honest else abtt(emb, k)
+
+    for p, i in enumerate(order):
+        if honest:
+            # refit on the prefix; row p of Xt is the current segment
+            Xt = abtt(emb[order[: p + 1]], k)
+            x = Xt[p]
+            members_of = lambda mem: Xt[mem]                       # noqa: E731
+        else:
+            Xt = Xt_full
+            x = Xt[i]
+            members_of = lambda mem: Xt[[order[q] for q in mem]]   # noqa: E731
+
         if entries:
-            cos = np.array([(lambda M: (M.mean(0)/(np.linalg.norm(M.mean(0))+1e-12)) @ x)(Xt[m])
-                            for m in entries])
-            k = int(np.argmax(cos))
-            srt = np.partition(cos, -2) if len(cos) >= 2 else np.array([cos[k], -1])
-            if (srt[-1] - srt[-2]) >= theta:
-                entries[k].append(i); assign[i] = k; continue
-        entries.append([i]); assign[i] = len(entries) - 1
-    return entries
+            cos = np.empty(len(entries))
+            for e, mem in enumerate(entries):
+                v = members_of(mem).mean(0)
+                cos[e] = (v / (np.linalg.norm(v) + 1e-12)) @ x
+            best = int(np.argmax(cos))
+            if len(cos) >= 2:
+                margin = cos[best] - np.partition(cos, -2)[-2]
+            else:
+                # exactly one entry: the margin is undefined. Step 10's sweep_margin
+                # falls back to the raw cosine magnitude here; match it, or the very
+                # first decision of every run merges unconditionally (a -1.0 runner-up
+                # makes the margin cos+1, which clears any theta).
+                margin = cos[best]
+            if margin >= theta:
+                entries[best].append(p)
+                continue
+        entries.append([p])
+
+    return [[order[p] for p in mem] for mem in entries]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--segments", required=True)
     ap.add_argument("--tag", required=True)
-    ap.add_argument("--theta", type=float, default=0.34)
+    # Step 10 (abtt1, streaming-honest) gives two defensible operating points. Those
+    # thetas were tuned under ORACLE growth (entries keyed by gold topic), so what they
+    # do under PREDICTED growth had to be measured separately. On the 523 gold segments:
+    #
+    #   theta   entries  recurring  largest  purity
+    #   0.156      329       76       15      0.658   best-F1
+    #   0.342      493       23        5      0.954   false-merge <= 5%   <- default
+    #
+    # 0.342 is the default: it satisfies the project's asymmetric cost rule
+    # (false-merge >> false-split) at 95% purity, and -- once the transform is fit
+    # honestly rather than in batch -- it still yields 23 recurring entries, enough to
+    # exercise the log-writing half. (The old batch-fit code gave only 4 at this theta.)
+    # Run both and report both.
+    ap.add_argument("--theta", type=float, default=0.342)
+    ap.add_argument("--abtt_k", type=int, default=1)
+    ap.add_argument("--batch_transform", action="store_true",
+                    help="fit ABTT once over the whole corpus (LEAKS future segments; "
+                         "for comparison against the honest default only)")
     ap.add_argument("--logwrite_model", default="dicta-il/dictalm2.0-instruct")
     ap.add_argument("--max_new_tokens", type=int, default=200)
     ap.add_argument("--no_logwrite", action="store_true", help="link only, skip log writing")
@@ -122,13 +174,15 @@ def main():
     emb = enc.encode([f"query: {r['text']}" for r in rows], batch_size=32,
                      convert_to_numpy=True, show_progress_bar=False).astype(np.float64)
     del enc; torch.cuda.empty_cache()
-    Xt = abtt(emb, 1)
+    emb = emb.astype(np.float64)
 
     # 2. LINK
-    entries = link(Xt, rows, args.theta)
+    entries = link(emb, rows, args.theta, k=args.abtt_k, honest=not args.batch_transform)
     n_multi = sum(len(e) >= 2 for e in entries)
-    log.info("Linked into %d journal entries (%d recurring, %d singletons) @theta=%.2f",
-             len(entries), n_multi, len(entries) - n_multi, args.theta)
+    log.info("Linked into %d journal entries (%d recurring, %d singletons) "
+             "@theta=%.3f abtt_k=%d transform=%s",
+             len(entries), n_multi, len(entries) - n_multi, args.theta, args.abtt_k,
+             "batch(LEAKY)" if args.batch_transform else "streaming-honest")
 
     # 3. LOG-WRITE
     journal = []
@@ -178,7 +232,9 @@ def main():
                 log.info("  logged %d/%d entries", eid + 1, len(entries))
 
     out = OUT / f"journal_{args.tag}.json"
-    json.dump({"tag": args.tag, "theta": args.theta, "n_segments": len(rows),
+    json.dump({"tag": args.tag, "theta": args.theta, "abtt_k": args.abtt_k,
+               "transform": "batch" if args.batch_transform else "streaming_honest",
+               "n_segments": len(rows),
                "n_entries": len(entries), "n_recurring": n_multi, "journal": journal},
               open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     log.info("Wrote %s", out)
