@@ -1,0 +1,24 @@
+{
+  "source": "steps/07_gold_eval/outputs/embeddings/e5.npy",
+  "n_segments": 523,
+  "transform": "abtt1",
+  "fit": "honest (prefix refit)",
+  "operating_points": {
+    "best_f1": {
+      "theta": 0.156,
+      "n_entries": 343,
+      "n_recurring": 80,
+      "largest_entry": 9,
+      "purity": 0.6883,
+      "purity_recurring_only": 0.3731
+    },
+    "fmr5": {
+      "theta": 0.342,
+      "n_entries": 491,
+      "n_recurring": 25,
+      "largest_entry": 5,
+      "purity": 0.9503,
+      "purity_recurring_only": 0.5439
+    }
+  }
+}

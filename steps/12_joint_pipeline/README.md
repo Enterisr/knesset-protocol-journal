@@ -60,9 +60,34 @@ e5 only embeds the first ~512 tokens of raw text anyway, so a clean ~600-word ca
 distillation of the whole segment can represent it *better* than raw-truncated — exactly
 Tomer's hypothesis, now testable on our full 36-repeat linking benchmark.
 
+## The two operating points (reproducible on CPU)
+
+`run_journal.py` needs a GPU to embed, so the entries/recurring/purity figures quoted in
+the write-up had no artifact behind them — `outputs/journal_raw.json` on disk is the
+**older, batch-fit** run (518 entries / 4 recurring), from before the leak fix.
+
+`code/verify_operating_points.py` closes that gap: it calls `run_journal.link()` — the real
+implementation — against Step 07's committed `e5.npy`, and writes
+`outputs/operating_points.json`. CPU-only, ~2 min.
+
+| θ | entries | recurring | largest | purity | |
+|---|---|---|---|---|---|
+| 0.156 | 343 | 80 | 9 | 0.688 | best-F1 |
+| **0.342** | 491 | **25** | 5 | **0.950** | false-merge ≤ 5% ← **default** |
+
+⚠️ These differ by a few entries from the figures first quoted (493/23/0.954 and
+329/76/0.658) because Step 07's `e5.npy` and `run_journal.py`'s own embedding pass are two
+different encodings of the same segments. **Quote the table above** — it is the one with a
+committed artifact behind it.
+
+The journal remains a **demonstration artifact**, not an evaluation surface: at ~0.13
+linking precision an end-to-end quality number would conflate linking error with
+summarization error.
+
 ## Files
 - `code/export_for_canon.py` → `outputs/canon_input.json` (Colab input)
 - `notebooks/canonicalize_gold.ipynb` — Colab canonicalizer (Tomer's prompt, resumable)
 - `code/build_segments.py` → `outputs/segments_{raw,canonical}.json`
 - `code/run_journal.py` → `outputs/journal_{raw,canonical}.json`
+- `code/verify_operating_points.py` → `outputs/operating_points.json` (CPU, no GPU needed)
 - `sbatch/12_joint_pipeline.sh`, `code/make_colab_notebook.py`

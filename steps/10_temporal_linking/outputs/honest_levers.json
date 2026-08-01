@@ -1,0 +1,80 @@
+{
+  "transform": "center",
+  "fit": "honest (prefix refit)",
+  "growth": "oracle (as Steps 07/08)",
+  "n_segments": 523,
+  "rows": {
+    "first_span+threshold": {
+      "best_f1": {
+        "theta": 0.184,
+        "precision": 0.0451,
+        "recall": 1.0,
+        "f1": 0.0863,
+        "false_merge_rate": 0.976,
+        "TP": 23,
+        "FP": 487,
+        "FN": 0,
+        "TN": 12
+      },
+      "best_f1_fmr<=5%": {
+        "theta": 0.82,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "false_merge_rate": 0.0453,
+        "TP": 0,
+        "FP": 22,
+        "FN": 36,
+        "TN": 464
+      }
+    },
+    "centroid+threshold": {
+      "best_f1": {
+        "theta": 0.196,
+        "precision": 0.0453,
+        "recall": 1.0,
+        "f1": 0.0866,
+        "false_merge_rate": 0.9719,
+        "TP": 23,
+        "FP": 485,
+        "FN": 0,
+        "TN": 14
+      },
+      "best_f1_fmr<=5%": {
+        "theta": 0.82,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "false_merge_rate": 0.0453,
+        "TP": 0,
+        "FP": 22,
+        "FN": 36,
+        "TN": 464
+      }
+    },
+    "centroid+margin": {
+      "best_f1": {
+        "theta_margin": 0.192,
+        "precision": 0.131,
+        "recall": 0.3438,
+        "f1": 0.1897,
+        "false_merge_rate": 0.149,
+        "TP": 11,
+        "FP": 73,
+        "FN": 21,
+        "TN": 417
+      },
+      "best_f1_fmr<=5%": {
+        "theta_margin": 0.33,
+        "precision": 0.1111,
+        "recall": 0.0857,
+        "f1": 0.0968,
+        "false_merge_rate": 0.0493,
+        "TP": 3,
+        "FP": 24,
+        "FN": 32,
+        "TN": 463
+      }
+    }
+  }
+}

@@ -51,10 +51,33 @@ for m in np.linspace(0, 0.5, 51):
 
 
 # ── Fig 1: leaderboard ────────────────────────────────────────────────────────
+# Every bar is DERIVED -- from the curves computed above, or from a committed JSON.
+# It used to be a hard-coded list, which drifted from the artifacts it claimed to
+# summarise (the fingerprint bar read 0.211 while fingerprint_linking_*.json said
+# 0.2407). Do not reintroduce literals here.
+def _best_f1(rows):
+    return max(r["f1"] for r in rows)
+
+
+def _best_f1_from_curve(path, key=None):
+    d = json.load(open(path, encoding="utf-8"))
+    if key:
+        d = d[key]
+    curves = d["models"].values() if "models" in d else [d]
+    return max(max(r["f1"] for r in c["curve"]) for c in curves)
+
+
+STEP08 = STEP_DIR.parent / "08_retrieve_verify" / "outputs"
 methods = ["baseline\n(first-span + threshold)", "Step 8 best\nLLM verifier",
            "Family E\nLLM verifier (full timeline)", "geometry\n(centroid + margin)",
            "geometry + LLM\nfingerprints"]
-f1s = [0.103, 0.111, 0.068, 0.190, 0.211]
+f1s = [_best_f1(base_rows),
+       _best_f1_from_curve(STEP08 / "verifier_eval_summary.json"),
+       _best_f1_from_curve(OUT / "timeline_verify_dictalm2.json"),
+       _best_f1(geo_rows),
+       _best_f1(fp_rows)]
+print("leaderboard F1s (derived): " + ", ".join(f"{m.splitlines()[0]}={v:.4f}"
+                                                for m, v in zip(methods, f1s)))
 colors = [GREY, GREY, GREY, BLUE, GREEN]
 fig, ax = plt.subplots(figsize=(8, 3.6))
 y = np.arange(len(methods))
@@ -62,11 +85,13 @@ ax.barh(y, f1s, color=colors)
 ax.set_yticks(y); ax.set_yticklabels(methods, fontsize=9)
 ax.invert_yaxis()
 ax.set_xlabel("Best F1 (streaming linking, gold eval)")
-ax.axvline(0.103, color=RED, ls="--", lw=1, label="baseline")
+ax.axvline(f1s[0], color=RED, ls="--", lw=1, label="baseline")
 for yi, v in zip(y, f1s):
     ax.text(v + 0.004, yi, f"{v:.3f}", va="center", fontsize=9)
-ax.set_xlim(0, 0.25); ax.legend(loc="lower right", fontsize=8)
-ax.set_title("Geometry beats every LLM verifier; LLM helps only as an extractor", fontsize=10)
+ax.set_xlim(0, max(f1s) * 1.25); ax.legend(loc="lower right", fontsize=8)
+ax.set_title("Geometry beats every LLM verifier; LLM helps only as an extractor\n"
+             "(all bars batch-fit, oracle growth — NOT the streaming-honest 0.190)",
+             fontsize=10)
 fig.tight_layout(); fig.savefig(OUT / "fig_leaderboard.png", dpi=150); plt.close(fig)
 
 
