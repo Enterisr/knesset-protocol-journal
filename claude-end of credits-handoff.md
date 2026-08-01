@@ -12,8 +12,8 @@ committed artifact during the session.
 a page of tables + figure, a page of worked examples, and references. Compiles clean
 (0 overfull boxes, 0 undefined references/citations).
 
-**Nothing is committed.** All work is in the working tree on `master`. That is the single
-outstanding action if you want it preserved.
+**Committed to local branch `report/acl-submission`** (4 commits off `master`, working tree
+clean). **Not pushed** — see §5.
 
 ---
 
